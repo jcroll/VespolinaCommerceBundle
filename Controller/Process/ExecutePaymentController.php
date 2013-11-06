@@ -9,6 +9,8 @@
 
 namespace Vespolina\CommerceBundle\Controller\Process;
 
+use Payum\Request\BinaryMaskStatusRequest;
+use Payum\Request\CaptureRequest;
 use Vespolina\CommerceBundle\Form\Type\Process\PaymentFormType;
 use Vespolina\CommerceBundle\Entity\CreditCard;
 use Payum\Registry\RegistryInterface;
@@ -19,6 +21,8 @@ class ExecutePaymentController extends AbstractProcessStepController
     public function executeAction()
     {
         $paymentName = 'paypal_pro_checkout_via_omnipay';
+        $payment = $this->getPayum()->getPayment($paymentName);
+
         $processManager = $this->getProcessManager();
         $request = $this->container->get('request');
         $paymentForm = $this->createPaymentForm();
@@ -30,49 +34,44 @@ class ExecutePaymentController extends AbstractProcessStepController
                 $creditCard = $paymentForm->getData();
 
                 $storage = $this->getPayum()->getStorageForClass(
-                    'Vespolina\DefaultStoreBundle\Document\OmnipayPaymentDetails',
+                    'Vespolina\DefaultStoreBundle\Document\PaymentDetails',
                     $paymentName
                 );
+
                 $paymentDetails = $storage->createModel();
                 $paymentDetails['amount'] = (float) 10;
-                $paymentDetails['card'] = $creditCard;
-                $storage->updateModel($paymentDetails);
-
-                /** @var \Vespolina\CommerceBundle\ProcessScenario\Checkout\CheckoutProcessB2C $process */
-                $process = $this->processStep->getProcess();
-                $process->completeProcessStep($this->processStep);
-                $processManager->updateProcess($process);
-                var_dump($process->execute()); die;
-
-                $captureToken = $this->getTokenFactory()->createCaptureToken(
-                    $paymentName,
-                    $paymentDetails,
-                    'acme_payment_details_view'
+                $paymentDetails['card'] = array(
+                    'number' => $creditCard->getNumber(),
+                    'expiryMonth' => $creditCard->getExpiryMonth(),
+                    'expiryYear' => $creditCard->getExpiryYear(),
+                    'cvv' => $creditCard->getCvv()
                 );
 
-                $paymentDetails['returnUrl'] = $captureToken->getTargetUrl();
-                $paymentDetails['cancelUrl'] = $captureToken->getTargetUrl();
+                try {
+                    $payment->execute(new CaptureRequest($paymentDetails));
+                    $payment->execute($status = new BinaryMaskStatusRequest($paymentDetails));
 
-                $storage->updateModel($paymentDetails);
+                    unset($paymentDetails['card']);
+                    $storage->updateModel($paymentDetails);
+                } catch (\Exception $e) {
+                    unset($paymentDetails['card']);
+                    $storage->updateModel($paymentDetails);
+
+                    throw $e;
+                }
+
+                if ($status->isSuccess()) {
+                    //Signal enclosing process step that we are done here
+                    /** @var \Vespolina\CommerceBundle\ProcessScenario\Checkout\CheckoutProcessB2C $process */
+                    $process = $this->processStep->getProcess();
+                    $process->completeProcessStep($this->processStep);
+                    $processManager->updateProcess($process);
+
+                    return $process->execute();
+                } else {
+                    $this->container->get('session')->getFlashBag()->add('danger', $response->getMessage());
+                }
             }
-
-
-
-
-
-//                return $this->container->get('router')->redirect($captureToken->getTargetUrl());
-//                $response = $paymentGateway->purchase(array('amount' => '10.00', 'card' => $creditCard))->send();
-//                if ($response->isSuccessful()) {
-//                    $process = $this->processStep->getProcess();
-//                    //Signal enclosing process step that we are done here
-//                    $process->completeProcessStep($this->processStep);
-//                    $processManager->updateProcess($process);
-//                    $this->container->get('session')->getFlashBag()->add('success', 'The transaction was successful.');
-//
-//                    return $process->execute();
-//                } else {
-//                    $this->container->get('session')->getFlashBag()->add('danger', $response->getMessage());
-//                }
         }
 
         return $this->render('VespolinaCommerceBundle:Process:Step/executePayment.html.twig',
